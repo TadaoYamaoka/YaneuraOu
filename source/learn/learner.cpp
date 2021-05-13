@@ -1154,7 +1154,7 @@ void gen_sfen(Position&, istringstream& is)
 		//multi_think.start_file_write_worker();
 		std::thread progress([&] {
 			while (true) {
-				std::this_thread::sleep_for(std::chrono::seconds(10)); // 指定秒だけ待機し、進捗を表示する。
+				std::this_thread::sleep_for(std::chrono::seconds(60)); // 指定秒だけ待機し、進捗を表示する。
 				hcpe3_writer.progress();
 				if (hcpe3_writer.positions >= loop_max)
 					break;
