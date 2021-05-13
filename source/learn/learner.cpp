@@ -295,6 +295,119 @@ private:
 	u64 sfen_write_count = 0;
 };
 
+struct HuffmanCodedPosAndEval3 {
+	HuffmanCodedPosAndEval3(const u16 moveNum, const u8 result) : moveNum(moveNum), result(result) {}
+	u8 hcp[32] = { 88, 164, 73, 33, 12, 215, 87, 33, 126, 142, 77, 33, 44, 175, 66, 120, 20, 194, 171, 16, 158, 77, 33, 44, 215, 95, 33, 62, 142, 73, 33, 12 }; // 開始局面
+	u16 moveNum; // 手数
+	u8 result; // xxxxxx11 : 勝敗、xxxxx1xx : 千日手、xxxx1xxx : 入玉宣言、xxx1xxxx : 最大手数
+	u8 opponent = 0; // 対戦相手（0:自己対局、1:先手usi、2:後手usi）
+};
+static_assert(sizeof(HuffmanCodedPosAndEval3) == 36, "");
+
+struct MoveInfo {
+	MoveInfo(const Move move, const s16 eval, const u16 candidateNum) : eval(eval), candidateNum(candidateNum) {
+		// MoveをApery形式に変換
+		constexpr unsigned short MOVE_DROP = 1 << 14;
+		constexpr unsigned short MOVE_PROMOTE = 1 << 15;
+		constexpr u32 PromoteFlag = 1 << 14;
+
+		u16 move16 = (unsigned short)move;
+		unsigned short to = move16 & 0x7f;
+		unsigned short from = (move16 >> 7) & 0x7f;
+		if ((move16 & MOVE_DROP) != 0) {
+			from += SQ_NB - 1;
+		}
+		selectedMove16 = to | (from << 7) | ((move16 & MOVE_PROMOTE) != 0 ? PromoteFlag : 0);
+	}
+	u16 selectedMove16; // 指し手
+	s16 eval; // 評価値
+	u16 candidateNum; // 候補手の数
+};
+static_assert(sizeof(MoveInfo) == 6, "");
+
+struct MoveVisits {
+	MoveVisits() {}
+	MoveVisits(const u16 move16, const u16 visitNum) : move16(move16), visitNum(visitNum) {}
+
+	u16 move16;
+	u16 visitNum;
+};
+static_assert(sizeof(MoveVisits) == 4, "");
+
+enum GameResult : u8 {
+	Draw, BlackWin, WhiteWin, GameResultNum
+};
+
+inline u8 color_to_win(const Color color) {
+	return (u8)color + 1;
+}
+
+inline u8 color_to_lose(const Color color) {
+	return WhiteWin - (u8)color;
+}
+
+constexpr u8 GAMERESULT_SENNICHITE = 0x4;
+constexpr u8 GAMERESULT_NYUGYOKU = 0x8;
+constexpr u8 GAMERESULT_MAXMOVE = 0x16;
+
+inline std::string add_filename_suffix(const std::string filepath) {
+	const auto pos0 = filepath.find_last_of("\\/");
+	const std::string directory = (pos0 == std::string::npos) ? "" : filepath.substr(0, pos0 + 1);
+	const std::string filename = (pos0 == std::string::npos) ? filepath : filepath.substr(pos0 + 1);
+
+	const auto pos1 = filename.find_last_of(".");
+	const std::string basename = (pos1 == std::string::npos) ? filename : filename.substr(0, pos1);
+	const std::string ext = (pos1 == std::string::npos) ? "" : filename.substr(pos1);
+
+	return directory + basename + "_nyugyoku" + ext;
+}
+
+struct Hcpe3Writer {
+	Hcpe3Writer(string filepath) : ofs_normal(filepath, std::ios::binary), ofs_nyugyoku(add_filename_suffix(filepath), std::ios::binary) {}
+
+	u64 write(const std::vector<MoveInfo>& records, const u8 gameResult, const u8 reason = 0) {
+		std::ofstream& ofs = (reason == GAMERESULT_NYUGYOKU) ? ofs_nyugyoku : ofs_normal;
+
+		HuffmanCodedPosAndEval3 hcpe3{
+			(u16)records.size(),
+			(u8)(gameResult | reason)
+		};
+		u64 len = 0;
+		{
+			std::unique_lock<std::mutex> lock(omutex);
+			ofs.write(reinterpret_cast<char*>(&hcpe3), sizeof(HuffmanCodedPosAndEval3));
+			for (const auto& record : records) {
+				ofs.write(reinterpret_cast<const char*>(&record), sizeof(MoveInfo));
+				if (record.candidateNum == 1) {
+					MoveVisits moveVisits{ record.selectedMove16, 1 };
+					ofs.write(reinterpret_cast<char*>(&moveVisits), sizeof(MoveVisits));
+					len++;
+				}
+			}
+		}
+
+		game_count++;
+		if (reason == GAMERESULT_NYUGYOKU)
+			nyugyoku_count++;
+		positions += len;
+
+		return len;
+	}
+
+	void progress() {
+		sync_cout << game_count << " games, " << nyugyoku_count << " nyugyoku, " << positions << " positions, at " << Tools::now_string() << sync_endl;
+	}
+
+	std::atomic<u64> game_count = 0;
+	std::atomic<u64> nyugyoku_count = 0;
+	std::atomic<u64> positions = 0;
+
+private:
+	std::ofstream ofs_normal;
+	std::ofstream ofs_nyugyoku;
+	std::mutex omutex;
+};
+
 // -----------------------------------
 //  棋譜を生成するworker(スレッドごと)
 // -----------------------------------
@@ -302,8 +415,8 @@ private:
 // 複数スレッドでsfenを生成するためのクラス
 struct MultiThinkGenSfen : public MultiThink
 {
-	MultiThinkGenSfen(int search_depth_, int search_depth2_, SfenWriter& sw_)
-		: search_depth(search_depth_), search_depth2(search_depth2_), sw(sw_)
+	MultiThinkGenSfen(int search_depth_, int search_depth2_, int search_nodes_, Hcpe3Writer& hcpe3_writer_)
+		: search_depth(search_depth_), search_depth2(search_depth2_), search_nodes(search_nodes_), hcpe3_writer(hcpe3_writer_)
 	{
 		hash.resize(GENSFEN_HASH_SIZE);
 
@@ -312,11 +425,14 @@ struct MultiThinkGenSfen : public MultiThink
 	}
 
 	virtual void thread_worker(size_t thread_id);
-	void start_file_write_worker() { sw.start_file_write_worker(); }
+	//void start_file_write_worker() { sw.start_file_write_worker(); }
 
 	//  search_depth = 通常探索の探索深さ
 	int search_depth;
 	int search_depth2;
+
+	// 探索ノード数
+	int search_nodes;
 
 	// 生成する局面の評価値の上限
 	int eval_limit;
@@ -346,7 +462,8 @@ struct MultiThinkGenSfen : public MultiThink
 	int write_maxply;
 
 	// sfenの書き出し器
-	SfenWriter& sw;
+	//SfenWriter& sw;
+	Hcpe3Writer& hcpe3_writer;
 
 	// 同一局面の書き出しを制限するためのhash
 	// hash_indexを求めるためのmaskに使うので、2**Nでなければならない。
@@ -390,14 +507,15 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 
 		// 1局分の局面を保存しておき、終局のときに勝敗を含めて書き出す。
 		// 書き出す関数は、この下にあるflush_psv()である。
-		PSVector a_psv;
-		a_psv.reserve(MAX_PLY2 + MAX_PLY);
+		//PSVector a_psv;
+		//a_psv.reserve(MAX_PLY2 + MAX_PLY);
+		std::vector<MoveInfo> records;
 
 		// a_psvに積まれている局面をファイルに書き出す。
 		// lastTurnIsWin : a_psvに積まれている最終局面の次の局面での勝敗
 		// 勝ちのときは1。負けのときは-1。引き分けのときは0を渡す。
 		// 返し値 : もう規定局面数に達したので終了する場合にtrue。
-		auto flush_psv = [&](s8 lastTurnIsWin)
+		/*auto flush_psv = [&](s8 lastTurnIsWin)
 		{
 			s8 isWin = lastTurnIsWin;
 
@@ -427,6 +545,20 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 				pos.set_from_packed_sfen(it->sfen);
 				cout << pos << "Win : " << it->isWin << " , " << it->score << endl;
 #endif
+			}
+		};*/
+		auto flush_hcpe3 = [&](const u8 gameResult, const u8 reason = 0)
+		{
+			const auto len = hcpe3_writer.write(records, gameResult, reason);
+
+			// 局面を書き出そうと思ったら規定回数に達していた。
+			// get_next_loop_count()内でカウンターを加算するので
+			// 局面を出力したときにこれを呼び出さないとカウンターが狂う。
+			auto loop_count = get_next_loop_count(len);
+			if (loop_count == UINT64_MAX)
+			{
+				// 終了フラグを立てておく。
+				quit = true;
 			}
 		};
 
@@ -468,6 +600,8 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 		// ply : 初期局面からの手数
 		for (int ply = 0; ; ++ply)
 		{
+			s16 eval = 0;
+			u16 candidateNum = 1;
 			//cout << pos << endl;
 
 			// 今回の探索depth
@@ -489,17 +623,19 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 			if (pos.is_mated())
 			{
 				// (この局面の一つ前の局面までは書き出す)
-				flush_psv(-1);
+				//flush_psv(-1);
+				flush_hcpe3(color_to_lose(pos.side_to_move()));
 				break;
 			}
 
 			// 宣言勝ち
-			if (pos.DeclarationWin() != MOVE_NONE)
+			/*if (pos.DeclarationWin() != MOVE_NONE)
 			{
 				// (この局面の一つ前の局面までは書き出す)
-				flush_psv(1);
+				//flush_psv(1);
+				flush_hcpe3(color_to_win(pos.side_to_move()), GAMERESULT_NYUGYOKU);
 				break;
-			}
+			}*/
 
 			// 定跡
 			if ((m = book.probe(pos)) != MOVE_NONE)
@@ -508,7 +644,8 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 				// その指し手はmに格納された。
 
 				// 定跡の局面は学習には用いない。
-				a_psv.clear();
+				//a_psv.clear();
+				records.emplace_back(m, 0, 0);
 
 				if (random_move_minply != -1)
 					// 定跡の局面であっても、一定確率でランダムムーブは行なう。
@@ -524,7 +661,7 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 				// search_depth～search_depth2 手読みの評価値とPV(最善応手列)
 				// 探索窓を狭めておいても問題ないはず。
 
-				auto pv_value1 = search(pos, depth);
+				auto pv_value1 = search(pos, depth, 1, search_nodes);
 
 				auto value1 = pv_value1.first;
 				auto& pv1 = pv_value1.second;
@@ -539,9 +676,34 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 				if (abs(value1) >= eval_limit)
 				{
 //					sync_cout << pos << "eval limit = " << eval_limit << " over , move = " << pv1[0] << sync_endl;
+					const auto color = pos.side_to_move();
+
+					// 宣言勝ちチェック
+					if (eval_limit == mate_in(2)) {
+						records.emplace_back(pv1[0], value1, 0);
+						pos.do_move(pv1[0], states[ply++]);
+						if (pos.DeclarationWin() != MOVE_NONE) {
+							// (この局面の一つ前の局面までは書き出す)
+							flush_hcpe3(color_to_win(pos.side_to_move()), GAMERESULT_NYUGYOKU);
+							break;
+						}
+
+						// 詰みの局面を除く
+						records.pop_back();
+						for (size_t i = records.size() - 1; i > 0; i -= 2) {
+							if (records[i].eval >= 30000 && records[i - 1].eval <= -30000) {
+								records.pop_back();
+								records.pop_back();
+							}
+							else {
+								break;
+							}
+						}
+					}
 
 					// この局面でvalue1 >= eval_limitならば、(この局面の手番側の)勝ちである。
-					flush_psv((value1 >= eval_limit) ? 1 : -1);
+					//flush_psv((value1 >= eval_limit) ? 1 : -1);
+					flush_hcpe3((value1 >= eval_limit) ? color_to_win(color) : color_to_lose(color));
 					break;
 				}
 
@@ -656,14 +818,15 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 				// →　比較実験すべき
 				if (ply < write_minply - 1)
 				{
-					a_psv.clear();
+					//a_psv.clear();
+					candidateNum = 0;
 					goto SKIP_SAVE;
 				}
 
 				// 同一局面を書き出したところか？
 				// これ、複数のPCで並列して生成していると同じ局面が含まれることがあるので
 				// 読み込みのときにも同様の処理をしたほうが良い。
-				{
+				/*{
 					auto key = pos.key();
 					auto hash_index = (size_t)(key & (GENSFEN_HASH_SIZE - 1));
 					auto key2 = hash[hash_index];
@@ -677,26 +840,27 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 						goto SKIP_SAVE;
 					}
 					hash[hash_index] = key; // 今回のkeyに入れ替えておく。
-				}
+				}*/
 
 				// 局面の一時保存。
 				{
-					a_psv.emplace_back(PackedSfenValue());
-					auto &psv = a_psv.back();
+					//a_psv.emplace_back(PackedSfenValue());
+					//auto &psv = a_psv.back();
 					
 					// packを要求されているならpackされたsfenとそのときの評価値を書き出す。
 					// 最終的な書き出しは、勝敗がついてから。
-					pos.sfen_pack(psv.sfen);
+					//pos.sfen_pack(psv.sfen);
 
 					// PV lineのleaf nodeでのroot colorから見たevaluate()の値を取得。
 					// search()の返し値をそのまま使うのとこうするのとの善悪は良くわからない。
-					psv.score = evaluate_leaf(pos, pv1);
-					psv.gamePly = ply;
+					//psv.score = evaluate_leaf(pos, pv1);
+					eval = pv_value1.first;
+					//psv.gamePly = ply;
 
 					// PVの初手を取り出す。これはdepth 0でない限りは存在するはず。
 					ASSERT_LV3(pv_value1.second.size() >= 1);
-					Move pv_move1 = pv_value1.second[0];
-					psv.move = pv_move1;
+					//Move pv_move1 = pv_value1.second[0];
+					//psv.move = pv_move1;
 				}
 
 			SKIP_SAVE:;
@@ -766,7 +930,7 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 				}
 				else {
 					// ロジックが複雑になるので、すまんがここで再度MultiPVで探索する。
-					Learner::search(pos, random_multi_pv_depth, random_multi_pv);
+					Learner::search(pos, random_multi_pv_depth, random_multi_pv, search_nodes);
 					// rootMovesの上位N手のなかから一つ選択
 
 					auto& rm = pos.this_thread()->rootMoves;
@@ -792,10 +956,14 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 
 				// ゲームの勝敗から指し手を評価しようとするとき、
 				// 今回のrandom moveがあるので、ここ以前には及ばないようにする。
-				a_psv.clear(); // 保存していた局面のクリア
+				//a_psv.clear(); // 保存していた局面のクリア
+				for (int i = records.size() - 1; i >= 0 && records[i].candidateNum != 0; --i)
+					records[i].candidateNum = 0;
+				candidateNum = 0;
 			}
 
 		DO_MOVE:;
+			records.emplace_back(m, eval, candidateNum);
 			pos.do_move(m, states[ply]);
 
 			// 差分計算を行なうために毎node evaluate()を呼び出しておく。
@@ -805,7 +973,7 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 	
 	} // while(!quit)
 	
-	sw.finalize(thread_id);
+	//sw.finalize(thread_id);
 }
 
 // -----------------------------------
@@ -827,6 +995,9 @@ void gen_sfen(Position&, istringstream& is)
 	// 探索深さ
 	int search_depth = 3;
 	int search_depth2 = INT_MIN;
+
+	// 探索ノード数
+	int search_nodes = 0;
 
 	// ランダムムーブを行なう最小plyと最大plyと回数
 	int random_move_minply = 1;
@@ -873,6 +1044,8 @@ void gen_sfen(Position&, istringstream& is)
 			is >> search_depth;
 		else if (token == "depth2")
 			is >> search_depth2;
+		else if (token == "nodes")
+			is >> search_nodes;
 		else if (token == "loop")
 			is >> loop_max;
 		else if (token == "output_file_name")
@@ -941,6 +1114,7 @@ void gen_sfen(Position&, istringstream& is)
 
 	std::cout << "gensfen : " << endl
 		<< "  search_depth = " << search_depth << " to " << search_depth2 << endl
+		<< "  search_nodes = " << search_nodes << endl
 		<< "  loop_max = " << loop_max << endl
 		<< "  eval_limit = " << eval_limit << endl
 		<< "  thread_num (set by USI setoption) = " << thread_num << endl
@@ -961,10 +1135,11 @@ void gen_sfen(Position&, istringstream& is)
 
 	// Options["Threads"]の数だけスレッドを作って実行。
 	{
-		SfenWriter sw(output_file_name, thread_num);
-		sw.save_every = save_every;
+		//SfenWriter sw(output_file_name, thread_num);
+		//sw.save_every = save_every;
+		Hcpe3Writer hcpe3_writer(output_file_name);
 
-		MultiThinkGenSfen multi_think(search_depth, search_depth2, sw);
+		MultiThinkGenSfen multi_think(search_depth, search_depth2, search_nodes, hcpe3_writer);
 		multi_think.set_loop_max(loop_max);
 		multi_think.eval_limit = eval_limit;
 		multi_think.random_move_minply = random_move_minply;
@@ -976,11 +1151,21 @@ void gen_sfen(Position&, istringstream& is)
 		multi_think.random_multi_pv_depth = random_multi_pv_depth;
 		multi_think.write_minply = write_minply;
 		multi_think.write_maxply = write_maxply;
-		multi_think.start_file_write_worker();
+		//multi_think.start_file_write_worker();
+		std::thread progress([&] {
+			while (true) {
+				std::this_thread::sleep_for(std::chrono::seconds(10)); // 指定秒だけ待機し、進捗を表示する。
+				hcpe3_writer.progress();
+				if (hcpe3_writer.positions >= loop_max)
+					break;
+			}
+		});
 		multi_think.go_think();
 
 		// SfenWriterのデストラクタでjoinするので、joinが終わってから終了したというメッセージを
 		// 表示させるべきなのでここをブロックで囲む。
+		progress.join();
+		hcpe3_writer.progress();
 	}
 
 	std::cout << "gensfen finished." << endl;

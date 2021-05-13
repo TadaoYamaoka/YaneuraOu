@@ -63,6 +63,13 @@ struct MultiThink
 			return UINT64_MAX;
 		return loop_count++;
 	}
+	u64 get_next_loop_count(u64 len) {
+		std::unique_lock<std::mutex> lk(loop_mutex);
+		loop_count += len;
+		if (loop_count >= loop_max)
+			return UINT64_MAX;
+		return loop_count;
+	}
 
 	// [ASYNC] 処理した個数を返す用。呼び出されるごとにインクリメントされたカウンターが返る。
 	u64 get_done_count() {
