@@ -470,6 +470,9 @@ struct MultiThinkGenSfen : public MultiThink
 	static const u64 GENSFEN_HASH_SIZE = 64 * 1024 * 1024;
 
 	vector<Key> hash; // 64MB*sizeof(HASH_KEY) = 512MB
+
+	// 終了フラグ
+	std::atomic<bool> quit = false;
 };
 
 //  thread_id    = 0..Threads.size()-1
@@ -484,9 +487,6 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 
 	// 今回の指し手。この指し手で局面を進める。
 	Move m = MOVE_NONE;
-
-	// 終了フラグ
-	bool quit = false;
 
 	// 規定回数回になるまで繰り返し
 	while (!quit)
@@ -598,7 +598,7 @@ void MultiThinkGenSfen::thread_worker(size_t thread_id)
 		int random_move_c = 0;
 
 		// ply : 初期局面からの手数
-		for (int ply = 0; ; ++ply)
+		for (int ply = 0; !quit ; ++ply)
 		{
 			s16 eval = 0;
 			u16 candidateNum = 1;
@@ -1154,10 +1154,15 @@ void gen_sfen(Position&, istringstream& is)
 		//multi_think.start_file_write_worker();
 		std::thread progress([&] {
 			while (true) {
-				std::this_thread::sleep_for(std::chrono::seconds(60)); // 指定秒だけ待機し、進捗を表示する。
-				hcpe3_writer.progress();
+				// 指定秒だけ待機し、進捗を表示する。
+				for (int i = 0; i < 6; i++) {
+					std::this_thread::sleep_for(std::chrono::seconds(10));
+					if (hcpe3_writer.positions >= loop_max)
+						break;
+				}
 				if (hcpe3_writer.positions >= loop_max)
 					break;
+				hcpe3_writer.progress();
 			}
 		});
 		multi_think.go_think();
