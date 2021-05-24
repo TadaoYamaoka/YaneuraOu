@@ -384,6 +384,7 @@ struct Hcpe3Writer {
 					len++;
 				}
 			}
+			ofs.flush();
 		}
 
 		game_count++;
