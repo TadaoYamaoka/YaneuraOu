@@ -1,6 +1,6 @@
 ﻿#include "../config.h"
 
-#if defined (ENABLE_MAKEBOOK_CMD) && defined(EVAL_LEARN)
+#if defined (ENABLE_MAKEBOOK_CMD) && (defined(EVAL_LEARN) || defined(YANEURAOU_ENGINE_DEEP))
 
 #include "book.h"
 #include "../position.h"
@@ -126,9 +126,11 @@ namespace Book
 		bool book_sort = token == "sort";
 		// 定跡の変換
 		bool convert_from_apery = token == "convert_from_apery";
-		
+		// 定跡の変換
+		bool convert_to_apery = token == "convert_to_apery";
+
 		// いずれのコマンドでもないなら、このtokenのコマンドを自分は処理できない。
-		if (!(from_sfen || from_thinking || book_merge || book_sort || convert_from_apery))
+		if (!(from_sfen || from_thinking || book_merge || book_sort || convert_from_apery || convert_to_apery))
 			return 0;
 
 		if (from_sfen || from_thinking)
@@ -244,7 +246,7 @@ namespace Book
 			if (! bw_files)
 			{
 				vector<string> tmp_sfens;
-				FileOperator::ReadAllLines(sfen_file_name[0], tmp_sfens);
+				SystemIO::ReadAllLines(sfen_file_name[0], tmp_sfens);
 
 				// こちらは先後、どちらの手番でも解析対象とするのでCOLOR_NBを指定しておく。
 				for (auto& sfen : tmp_sfens)
@@ -263,7 +265,7 @@ namespace Book
 						continue;
 
 					vector<string> tmp_sfens;
-					FileOperator::ReadAllLines(filename, tmp_sfens);
+					SystemIO::ReadAllLines(filename, tmp_sfens);
 					for (auto& sfen : tmp_sfens)
 						sfens.push_back(SfenAndColor(sfen, c));
 				}
@@ -647,11 +649,19 @@ namespace Book
 
 			book.write_book(book_dst);
 		}
+		else if (convert_to_apery) {
+			MemoryBook book;
+			string book_src, book_dst;
+			is >> book_src >> book_dst;
+			cout << "convert book from " << book_src << " , write apery book to " << book_dst << endl;
+			book.read_book(book_src);
+
+			book.write_apery_book(book_dst);
+		}
 
 		return 1;
 	}
 
 } // namespace Book
 
-#endif // defined (ENABLE_MAKEBOOK_CMD) && defined(EVAL_LEARN)
-
+#endif // defined(YANEURAOU_ENGINE) && (defined(EVAL_LEARN) || defined(YANEURAOU_ENGINE_DEEP))

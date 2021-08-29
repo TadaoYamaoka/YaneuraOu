@@ -1,6 +1,6 @@
 ﻿#include "../types.h"
 
-#if defined (ENABLE_MAKEBOOK_CMD) && defined(EVAL_LEARN)
+#if defined (ENABLE_MAKEBOOK_CMD) && (defined(EVAL_LEARN) || defined(YANEURAOU_ENGINE_DEEP))
 
 #include "book.h"
 #include "../position.h"
@@ -661,7 +661,7 @@ namespace {
 			return;
 		}
 		vector<string> lines;
-		FileOperator::ReadAllLines(read_sfen_name, lines);
+		SystemIO::ReadAllLines(read_sfen_name, lines);
 
 		// 初期局面から(depth 10000ではないものを)辿ってgame treeを構築する。
 
@@ -862,5 +862,5 @@ namespace Book
 	}
 }
 
-#endif // defined (ENABLE_MAKEBOOK_CMD) && defined(EVAL_LEARN)
+#endif // defined(YANEURAOU_ENGINE) && (defined(EVAL_LEARN) || defined(YANEUROU_ENGINE_DEEP))
 
